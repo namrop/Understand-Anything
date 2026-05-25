@@ -57,11 +57,54 @@ RESUME = os.environ.get('UA_DIRECT_RESUME', '1') != '0'
 CONTENT_CHAR_BUDGET = int(os.environ.get('UA_DIRECT_CONTENT_CHARS', '24000'))
 MAX_PER_FILE_CHARS = int(os.environ.get('UA_DIRECT_MAX_FILE_CHARS', '2500'))
 API_KEY = ''
+LOCK = threading.Lock()
+STATS: dict[str, Any] = {
+    'phase': 'init',
+    'model': MODEL,
+    'workers': MAX_WORKERS,
+    'completed': 0,
+    'failed': 0,
+    'fallback': 0,
+    'retried': 0,
+    'api_calls': 0,
+    'usage': {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0},
+    'batches': {},
+}
 
 VALID_NODE_TYPES = {'file','function','class','module','concept','config','document','service','table','endpoint','pipeline','schema','resource','domain','flow','step','article','entity','topic','claim','source'}
 VALID_EDGE_TYPES = {'imports','exports','contains','inherits','implements','calls','subscribes','publishes','middleware','reads_from','writes_to','transforms','validates','depends_on','tested_by','configures','related','similar_to','deploys','serves','provisions','triggers','migrates','documents','routes','defines_schema','contains_flow','flow_step','cross_domain','cites','contradicts','builds_on','exemplifies','categorized_under','authored_by'}
 VALID_COMPLEXITY = {'simple','moderate','complex'}
 FILE_LEVEL_TYPES = {'file','config','document','service','pipeline','table','schema','resource','endpoint'}
+
+
+def load_env_file(path: Path) -> dict[str, str]:
+    """Parse simple KEY=VALUE env files without exporting or logging secrets."""
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw in path.read_text(encoding='utf-8', errors='replace').splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            values[key] = value
+    return values
+
+
+def get_api_key(env_files: list[Path]) -> str:
+    """Resolve the DeepSeek API key from environment first, then explicit files."""
+    key = os.environ.get('DEEPSEEK_API_KEY') or os.environ.get('OPENAI_API_KEY') or ''
+    if key:
+        return key
+    for path in env_files:
+        values = load_env_file(path)
+        key = values.get('DEEPSEEK_API_KEY') or values.get('OPENAI_API_KEY') or ''
+        if key:
+            return key
+    raise RuntimeError('DEEPSEEK_API_KEY is not set and no explicit --env-file provided it')
 
 
 def json_dumps(obj: Any, max_chars: int | None = None) -> str:
