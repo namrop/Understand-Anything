@@ -300,7 +300,27 @@ Load `.understand-anything/intermediate/batches.json` (produced by Phase 1.5). I
 
 Report: `[Phase 2/7] Analyzing files — <totalFiles> files in <totalBatches> batches (up to 5 concurrent)...`
 
-For each batch, dispatch a subagent using the `file-analyzer` agent definition (at `agents/file-analyzer.md`). Run up to **5 subagents concurrently**. Append the following additional context:
+#### Optional direct DeepSeek runner for large/non-interactive runs
+
+If the environment has `DEEPSEEK_API_KEY` available and the normal agentic batch loop is too slow, too conversational, or unreliable for a large repository, you may replace the per-batch subagent dispatch loop with the bundled direct runner:
+
+```bash
+python <SKILL_DIR>/direct-deepseek-runner.py "$PROJECT_ROOT" \
+  --skill-dir <SKILL_DIR> \
+  --model "${DEEPSEEK_MODEL:-deepseek-v4-pro}" \
+  --workers "${UA_DIRECT_WORKERS:-4}"
+```
+
+Notes:
+- The direct runner expects Phase 1/1.5 artifacts to exist: `scan-result.json` and `batches.json`.
+- Secrets are read only from the process environment or explicit `--env-file` paths; do not commit env files or copy local credential paths into the repo.
+- It writes `intermediate/batch-*.json`, runs `merge-batch-graphs.py`, writes `.understand-anything/knowledge-graph.json`, updates `meta.json`, and records `.understand-anything/deepseek-direct-run-report.json`.
+- Use `--limit N` for smoke tests and `--no-resume` to discard existing batch outputs before a clean run.
+- This path is currently DeepSeek/OpenAI-compatible-chat-completions-specific. For general provider support, promote it into a provider-agnostic runner rather than adding more provider-specific branches here.
+
+If you use the direct runner successfully, skip the manual subagent loop below and continue with the post-merge/final validation phases using the generated `knowledge-graph.json`.
+
+For the default path, dispatch a subagent for each batch using the `file-analyzer` agent definition (at `agents/file-analyzer.md`). Run up to **5 subagents concurrently**. Append the following additional context:
 
 > **Additional context from main session:**
 >

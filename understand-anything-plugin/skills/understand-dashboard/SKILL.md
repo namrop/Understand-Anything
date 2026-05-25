@@ -77,29 +77,93 @@ Start the Understand Anything dashboard to visualize the knowledge graph for the
    cd <plugin-root> && pnpm --filter @understand-anything/core build
    ```
 
-5. Start the Vite dev server pointing at the project's knowledge graph:
+5. Start the Vite dev server pointing at the project's knowledge graph. Before launch, discover the MagicDNS host if Tailscale is available and pass it as `UNDERSTAND_ALLOWED_HOSTS`; this lets Vite accept the Host header that Tailscale Serve will use while keeping the actual listener bound to loopback:
    ```bash
-   cd <dashboard-dir> && GRAPH_DIR=<project-dir> npx vite --host 127.0.0.1
+   TS_STATUS_JSON=$(mktemp -t ua-ts-status.XXXXXX.json)
+   UNDERSTAND_ALLOWED_HOSTS=""
+   if command -v tailscale >/dev/null 2>&1 && tailscale status --json > "$TS_STATUS_JSON" 2>/dev/null; then
+     UNDERSTAND_ALLOWED_HOSTS=$(python3 - "$TS_STATUS_JSON" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+self = d.get('Self', {})
+print((self.get('DNSName') or self.get('HostName') or '').rstrip('.'))
+PY
+)
+   fi
+   cd <dashboard-dir> && GRAPH_DIR=<project-dir> UNDERSTAND_ALLOWED_HOSTS="$UNDERSTAND_ALLOWED_HOSTS" npx vite --host 127.0.0.1
    ```
-   Run this in the background so the user can continue working.
+   Run this in the background so the user can continue working. Keep Vite bound to loopback; do **not** bind it to `0.0.0.0`.
 
 6. **Capture the access token URL from the server output.** The Vite server prints a line like:
    ```
-   🔑  Dashboard URL: http://127.0.0.1:<PORT>?token=<TOKEN>
+   🔑  Dashboard URL: http://127.0.0.1:<PORT>/?token=<TOKEN>
    ```
    Extract the full URL including the `?token=` parameter. The token is required to access the knowledge graph data — without it the dashboard will show an "Access Token Required" gate.
 
-7. Report to the user, including the full tokenized URL:
+7. **Expose the dashboard through Tailscale Serve by default when available.** This Hermes/Lux install should prefer a tailnet HTTPS URL over a raw localhost URL, so Luis can open the dashboard from other tailnet devices without broad LAN/public binding.
+
+   - First parse the Vite port and token from the captured local URL.
+   - Discover the node's MagicDNS name with `tailscale status --json`; strip any trailing dot.
+   - Use a dedicated HTTPS serve port, defaulting to `${UA_TAILSCALE_HTTPS_PORT:-9444}`. Do **not** overwrite an existing root `:443` Tailscale Serve config; if the chosen port is already present in `tailscale serve status --json`, increment to the next free port up to `9460`.
+   - Run:
+     ```bash
+     tailscale serve --yes --bg --https=<TAILSCALE_HTTPS_PORT> http://127.0.0.1:<VITE_PORT>
+     ```
+   - Construct and report the tailnet URL:
+     ```text
+     https://<magicdns-name>:<TAILSCALE_HTTPS_PORT>/?token=<TOKEN>
+     ```
+   - If Tailscale is unavailable, offline, or `tailscale serve` fails, fall back to the local URL and report the Tailscale failure explicitly. Do not block local dashboard use on Tailscale.
+
+   Reference shell for the Tailscale step:
+   ```bash
+   LOCAL_URL="http://127.0.0.1:<PORT>/?token=<TOKEN>"
+   VITE_PORT=$(printf '%s\n' "$LOCAL_URL" | sed -E 's#^http://127\.0\.0\.1:([0-9]+)/?.*$#\1#')
+   TOKEN=$(printf '%s\n' "$LOCAL_URL" | sed -E 's#.*[?&]token=([^&]+).*#\1#')
+   TS_STATUS_JSON=$(mktemp -t ua-ts-status.XXXXXX.json)
+   TS_SERVE_JSON=$(mktemp -t ua-ts-serve.XXXXXX.json)
+   tailscale status --json > "$TS_STATUS_JSON"
+   TS_DNS=$(python3 - "$TS_STATUS_JSON" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+self = d.get('Self', {})
+print((self.get('DNSName') or self.get('HostName') or '').rstrip('.'))
+PY
+)
+   TS_PORT=${UA_TAILSCALE_HTTPS_PORT:-9444}
+   while true; do
+     tailscale serve status --json > "$TS_SERVE_JSON" 2>/dev/null || printf '{}' > "$TS_SERVE_JSON"
+     if ! python3 - "$TS_SERVE_JSON" "$TS_PORT" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+raise SystemExit(0 if sys.argv[2] in (d.get('TCP') or {}) else 1)
+PY
+     then
+       break
+     fi
+     TS_PORT=$((TS_PORT + 1))
+     if [ "$TS_PORT" -gt 9460 ]; then echo "No free Tailscale Serve HTTPS port in 9444-9460" >&2; exit 1; fi
+   done
+   tailscale serve --yes --bg --https="$TS_PORT" "http://127.0.0.1:$VITE_PORT"
+   printf 'https://%s:%s/?token=%s\n' "$TS_DNS" "$TS_PORT" "$TOKEN"
    ```
-   Dashboard started at http://127.0.0.1:<PORT>?token=<TOKEN>
+
+8. Report to the user, including the full tokenized Tailscale URL when available and the local fallback URL:
+   ```
+   Dashboard started at https://<magicdns-name>:<TAILSCALE_HTTPS_PORT>/?token=<TOKEN>
+   Local fallback: http://127.0.0.1:<PORT>/?token=<TOKEN>
    Viewing: <project-dir>/.understand-anything/knowledge-graph.json
 
-   The dashboard is running in the background. Press Ctrl+C in the terminal to stop it.
+   The dashboard is running in the background. Stop the Vite process to stop the local server. The Tailscale Serve route is persistent; remove the dedicated route with `tailscale serve --yes --https=<TAILSCALE_HTTPS_PORT> off` when you no longer want it.
    ```
-   **Important:** Always include the `?token=` parameter in the URL you share. If you omit it, the user will be blocked by the token gate and have to manually find the token in the terminal output.
+   **Important:** Always include the `?token=` parameter in every URL you share. If you omit it, the user will be blocked by the token gate and have to manually find the token in the terminal output.
 
 ## Notes
 
-- The dashboard auto-opens in the default browser via `--open`
+- The dashboard remains loopback-bound locally, then is exposed to the tailnet with Tailscale Serve on a dedicated HTTPS port (default first choice: `9444`)
 - If port 5173 is already in use, Vite will pick the next available port
 - The `GRAPH_DIR` environment variable tells the dashboard where to find the knowledge graph
+- Tailscale Serve routes are persistent; prefer dedicated non-443 ports here so existing root/path serve config is not clobbered. Clean a dashboard route with `tailscale serve --yes --https=<port> off`, not `tailscale serve reset`.

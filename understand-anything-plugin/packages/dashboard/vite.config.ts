@@ -10,6 +10,10 @@ import crypto from "crypto";
 // This token is printed to the terminal and must be in the URL
 // to fetch knowledge-graph.json or diff-overlay.json.
 const ACCESS_TOKEN = process.env.UNDERSTAND_ACCESS_TOKEN || crypto.randomBytes(16).toString("hex");
+const ADDITIONAL_ALLOWED_HOSTS = (process.env.UNDERSTAND_ALLOWED_HOSTS ?? "")
+  .split(",")
+  .map((host) => host.trim())
+  .filter(Boolean);
 const MAX_SOURCE_FILE_BYTES = 1024 * 1024;
 
 function graphFileCandidates(fileName: string): string[] {
@@ -183,11 +187,14 @@ export default defineConfig({
   },
 
   // FIX 1 — bind only to localhost, not 0.0.0.0
-  // This blocks access from any other device on the same LAN / WiFi.
+  // This blocks direct access from other devices on the same LAN / WiFi.
+  // Tailscale Serve can still proxy to this loopback listener; set
+  // UNDERSTAND_ALLOWED_HOSTS=<magicdns-name> so Vite accepts the tailnet Host header.
   server: {
     host: "127.0.0.1",
     port: 5173,
     open: `/?token=${ACCESS_TOKEN}`,
+    allowedHosts: ["127.0.0.1", "localhost", ...ADDITIONAL_ALLOWED_HOSTS],
   },
 
   resolve: {
