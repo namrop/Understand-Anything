@@ -300,23 +300,36 @@ Load `.understand-anything/intermediate/batches.json` (produced by Phase 1.5). I
 
 Report: `[Phase 2/7] Analyzing files — <totalFiles> files in <totalBatches> batches (up to 5 concurrent)...`
 
-#### Optional direct DeepSeek runner for large/non-interactive runs
+#### Optional direct provider runner for large/non-interactive runs
 
-If the environment has `DEEPSEEK_API_KEY` available and the normal agentic batch loop is too slow, too conversational, or unreliable for a large repository, you may replace the per-batch subagent dispatch loop with the bundled direct runner:
+If the normal agentic batch loop is too slow, too conversational, or unreliable for a repository, you may replace the per-batch subagent dispatch loop with the bundled direct runner. It supports both OpenAI-compatible HTTP providers and the local Codex CLI OAuth session.
+
+DeepSeek/OpenAI-compatible HTTP example:
 
 ```bash
-python <SKILL_DIR>/direct-deepseek-runner.py "$PROJECT_ROOT" \
+python <SKILL_DIR>/direct-provider-runner.py "$PROJECT_ROOT" \
   --skill-dir <SKILL_DIR> \
+  --provider deepseek \
   --model "${DEEPSEEK_MODEL:-deepseek-v4-pro}" \
   --workers "${UA_DIRECT_WORKERS:-4}"
 ```
 
+Codex OAuth / GPT 5.5 example:
+
+```bash
+python <SKILL_DIR>/direct-provider-runner.py "$PROJECT_ROOT" \
+  --skill-dir <SKILL_DIR> \
+  --provider codex-cli \
+  --model "${UA_CODEX_MODEL:-gpt-5.5}" \
+  --workers 1
+```
+
 Notes:
 - The direct runner expects Phase 1/1.5 artifacts to exist: `scan-result.json` and `batches.json`.
-- Secrets are read only from the process environment or explicit `--env-file` paths; do not commit env files or copy local credential paths into the repo.
-- It writes `intermediate/batch-*.json`, runs `merge-batch-graphs.py`, writes `.understand-anything/knowledge-graph.json`, updates `meta.json`, and records `.understand-anything/deepseek-direct-run-report.json`.
+- Secrets are read only from the process environment or explicit `--env-file` paths for HTTP providers; do not commit env files or copy local credential paths into the repo. `--provider codex-cli` uses Codex's configured OAuth session and does not require `DEEPSEEK_API_KEY` or `OPENAI_API_KEY`.
+- It writes `intermediate/batch-*.json`, runs `merge-batch-graphs.py`, writes `.understand-anything/knowledge-graph.json`, updates `meta.json`, and records `.understand-anything/direct-run-report.json` plus the legacy `.understand-anything/deepseek-direct-run-report.json` alias.
 - Use `--limit N` for smoke tests and `--no-resume` to discard existing batch outputs before a clean run.
-- This path is currently DeepSeek/OpenAI-compatible-chat-completions-specific. For general provider support, promote it into a provider-agnostic runner rather than adding more provider-specific branches here.
+- The runner prompts for file, function, and class nodes, merges deterministic tree-sitter symbol extraction back into LLM output, and emits `contains` edges so the graph retains source-reference surfaces even when provider output is sparse.
 
 If you use the direct runner successfully, skip the manual subagent loop below and continue with the post-merge/final validation phases using the generated `knowledge-graph.json`.
 

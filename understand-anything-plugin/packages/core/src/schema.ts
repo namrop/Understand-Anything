@@ -650,7 +650,7 @@ export function validateGraph(data: unknown): ValidationResult {
     }
   }
 
-  const graph = {
+  const graph: z.infer<typeof KnowledgeGraphSchema> = {
     version: typeof fixed.version === "string" ? fixed.version : "1.0.0",
     project: projectResult.data,
     nodes: validNodes,
@@ -658,6 +658,9 @@ export function validateGraph(data: unknown): ValidationResult {
     layers: validLayers,
     tour: validTour,
   };
+  if (fixed.kind === "codebase" || fixed.kind === "knowledge") {
+    graph.kind = fixed.kind;
+  }
 
   return { success: true, data: graph, issues, errors: buildErrors(issues) };
 }

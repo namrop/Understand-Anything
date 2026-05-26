@@ -10,6 +10,7 @@ import type {
 import type { ReactFlowInstance } from "@xyflow/react";
 
 export type Persona = "non-technical" | "junior" | "experienced";
+export type DashboardMode = "overview" | "learn" | "deep-dive";
 export type NavigationLevel = "overview" | "layer-detail";
 export type NodeType = "file" | "function" | "class" | "module" | "concept" | "config" | "document" | "service" | "table" | "endpoint" | "pipeline" | "schema" | "resource" | "domain" | "flow" | "step" | "article" | "entity" | "topic" | "claim" | "source";
 export type Complexity = "simple" | "moderate" | "complex";
@@ -125,6 +126,7 @@ interface DashboardStore {
   tourHighlightedNodeIds: string[];
 
   persona: Persona;
+  dashboardMode: DashboardMode;
 
   diffMode: boolean;
   changedNodeIds: Set<string>;
@@ -165,6 +167,7 @@ interface DashboardStore {
   setFocusNode: (nodeId: string | null) => void;
   setSearchQuery: (query: string) => void;
   setPersona: (persona: Persona) => void;
+  setDashboardMode: (mode: DashboardMode) => void;
   openCodeViewer: (nodeId: string) => void;
   closeCodeViewer: () => void;
   expandCodeViewer: () => void;
@@ -307,7 +310,8 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   currentTourStep: 0,
   tourHighlightedNodeIds: [],
 
-  persona: "junior",
+  persona: "non-technical",
+  dashboardMode: "overview",
 
   diffMode: false,
   changedNodeIds: new Set<string>(),
@@ -534,7 +538,22 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   setPersona: (persona) =>
     set({
       persona,
+      dashboardMode: persona === "non-technical" ? "overview" : persona === "junior" ? "learn" : "deep-dive",
       // Persona changes filter node types, which shifts container.nodeIds.
+      containerLayoutCache: new Map(),
+      containerSizeMemory: new Map(),
+      expandedContainers: new Set(),
+      pendingFocusContainer: null,
+    }),
+
+  setDashboardMode: (mode) =>
+    set({
+      dashboardMode: mode,
+      persona: mode === "overview" ? "non-technical" : mode === "learn" ? "junior" : "experienced",
+      detailLevel: mode === "deep-dive" || mode === "learn" ? "class" : "file",
+      showFunctionsInClassView: mode === "deep-dive",
+      tourActive: mode === "learn" ? get().tourActive : false,
+      tourHighlightedNodeIds: mode === "learn" ? get().tourHighlightedNodeIds : [],
       containerLayoutCache: new Map(),
       containerSizeMemory: new Map(),
       expandedContainers: new Set(),
@@ -608,6 +627,9 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     const layerNav = navigateTourToLayer(nodeIdToLayerId, sorted[0].nodeIds);
     set({
       tourActive: true,
+      dashboardMode: "learn",
+      persona: "junior",
+      detailLevel: "class",
       currentTourStep: 0,
       tourHighlightedNodeIds: sorted[0].nodeIds,
       selectedNodeId: null,

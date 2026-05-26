@@ -23,8 +23,12 @@ type SourceState =
   | { status: "loaded"; source: SourceFile; error: null }
   | { status: "error"; source: null; error: string };
 
+const GRAPH_LIBRARY_SELECTED_KEY = "understand-anything-selected-graph";
+
 function fileContentUrl(filePath: string, token: string): string {
   const params = new URLSearchParams({ token, path: filePath });
+  const selectedGraphId = sessionStorage.getItem(GRAPH_LIBRARY_SELECTED_KEY);
+  if (selectedGraphId) params.set("graph", selectedGraphId);
   return `/file-content.json?${params.toString()}`;
 }
 

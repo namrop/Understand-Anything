@@ -14,6 +14,7 @@ import CustomNode from "./CustomNode";
 import type { CustomNodeData } from "./CustomNode";
 import { useDashboardStore } from "../store";
 import { applyForceLayout, NODE_WIDTH, NODE_HEIGHT } from "../utils/layout";
+import { buildKnowledgeGraphViewport } from "../utils/knowledgeGraphViewport";
 import type { KnowledgeGraph } from "@understand-anything/core/types";
 
 const nodeTypes = {
@@ -112,6 +113,16 @@ function KnowledgeGraphViewInner() {
     [searchResultsRaw],
   );
 
+  const viewport = useMemo(() => {
+    if (!graph) return null;
+    return buildKnowledgeGraphViewport(graph, {
+      selectedNodeId,
+      focusNodeId,
+      searchResultNodeIds: searchResultsRaw.map((result) => result.nodeId),
+      tourHighlightedNodeIds,
+    });
+  }, [graph, selectedNodeId, focusNodeId, searchResultsRaw, tourHighlightedNodeIds]);
+
   const tourSet = useMemo(
     () => new Set(tourHighlightedNodeIds),
     [tourHighlightedNodeIds],
@@ -119,9 +130,9 @@ function KnowledgeGraphViewInner() {
 
   // Filter graph — only recompute when graph data or filters change
   const filteredGraph = useMemo((): KnowledgeGraph | null => {
-    if (!graph) return null;
+    if (!viewport?.graph) return null;
 
-    const filteredNodes = graph.nodes.filter((n) => {
+    const filteredNodes = viewport.graph.nodes.filter((n) => {
       if (["article", "entity", "topic", "claim", "source"].includes(n.type)) {
         return nodeTypeFilters.knowledge !== false;
       }
@@ -129,12 +140,12 @@ function KnowledgeGraphViewInner() {
     });
 
     const filteredNodeIds = new Set(filteredNodes.map((n) => n.id));
-    const filteredEdges = graph.edges.filter(
+    const filteredEdges = viewport.graph.edges.filter(
       (e) => filteredNodeIds.has(e.source) && filteredNodeIds.has(e.target),
     );
 
-    return { ...graph, nodes: filteredNodes, edges: filteredEdges };
-  }, [graph, nodeTypeFilters]);
+    return { ...viewport.graph, nodes: filteredNodes, edges: filteredEdges };
+  }, [viewport, nodeTypeFilters]);
 
   // Compute layout ONCE per graph/filter change — stable positions
   const { positionMap, edgeCounts } = useMemo(() => {
@@ -239,6 +250,41 @@ function KnowledgeGraphViewInner() {
     return (
       <div className="h-full flex items-center justify-center text-text-muted text-sm">
         No knowledge graph available. Run /understand-knowledge to generate one.
+      </div>
+    );
+  }
+
+  if (!viewport) return null;
+
+  if (viewport.mode === "overview" || !viewport.graph) {
+    return (
+      <div className="h-full flex items-center justify-center p-6">
+        <div className="max-w-lg rounded-2xl border border-border-subtle bg-surface/80 p-6 text-center shadow-xl">
+          <div className="text-[11px] uppercase tracking-[0.24em] text-accent/80 mb-3">
+            Large knowledge graph loaded
+          </div>
+          <h2 className="font-serif text-2xl text-text-primary mb-3">
+            Search or select a node to render a bounded neighborhood
+          </h2>
+          <p className="text-sm text-text-secondary leading-6 mb-5">
+            This graph has {viewport.totalNodes.toLocaleString()} nodes and {viewport.totalEdges.toLocaleString()} edges.
+            The dashboard is intentionally not running a full force layout on the main thread.
+          </p>
+          <div className="grid grid-cols-3 gap-3 text-left">
+            <div className="rounded-lg border border-border-subtle bg-elevated/60 p-3">
+              <div className="text-[10px] uppercase tracking-wider text-text-muted">Nodes</div>
+              <div className="text-lg text-text-primary">{viewport.totalNodes.toLocaleString()}</div>
+            </div>
+            <div className="rounded-lg border border-border-subtle bg-elevated/60 p-3">
+              <div className="text-[10px] uppercase tracking-wider text-text-muted">Edges</div>
+              <div className="text-lg text-text-primary">{viewport.totalEdges.toLocaleString()}</div>
+            </div>
+            <div className="rounded-lg border border-border-subtle bg-elevated/60 p-3">
+              <div className="text-[10px] uppercase tracking-wider text-text-muted">Render cap</div>
+              <div className="text-lg text-text-primary">{viewport.maxNodes.toLocaleString()}</div>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }

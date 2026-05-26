@@ -99,7 +99,7 @@ PY
    ```
    🔑  Dashboard URL: http://127.0.0.1:<PORT>/?token=<TOKEN>
    ```
-   Extract the full URL including the `?token=` parameter. The token is required to access the knowledge graph data — without it the dashboard will show an "Access Token Required" gate.
+   Extract the full URL including the `?token=` parameter for first login. Current dashboard builds set a persistent `HttpOnly`, `SameSite=Lax` cookie after the token is validated, then strip the token from the browser address bar. Future visits from the same browser can use the clean URL until the cookie expires or the user clicks the forget-device control.
 
 7. **Expose the dashboard through Tailscale Serve by default when available.** This Hermes/Lux install should prefer a tailnet HTTPS URL over a raw localhost URL, so Luis can open the dashboard from other tailnet devices without broad LAN/public binding.
 
@@ -151,15 +151,16 @@ PY
    printf 'https://%s:%s/?token=%s\n' "$TS_DNS" "$TS_PORT" "$TOKEN"
    ```
 
-8. Report to the user, including the full tokenized Tailscale URL when available and the local fallback URL:
+8. Report to the user, including the tokenized Tailscale URL when available for first login and the clean local fallback URL. After first login, the browser persists authorization via an HttpOnly cookie and can use the clean URL until the cookie is cleared or expires:
    ```
    Dashboard started at https://<magicdns-name>:<TAILSCALE_HTTPS_PORT>/?token=<TOKEN>
+   Clean follow-up URL: https://<magicdns-name>:<TAILSCALE_HTTPS_PORT>/
    Local fallback: http://127.0.0.1:<PORT>/?token=<TOKEN>
    Viewing: <project-dir>/.understand-anything/knowledge-graph.json
 
    The dashboard is running in the background. Stop the Vite process to stop the local server. The Tailscale Serve route is persistent; remove the dedicated route with `tailscale serve --yes --https=<TAILSCALE_HTTPS_PORT> off` when you no longer want it.
    ```
-   **Important:** Always include the `?token=` parameter in every URL you share. If you omit it, the user will be blocked by the token gate and have to manually find the token in the terminal output.
+   **Important:** Include the `?token=` parameter for first login or recovery. Do not require Luis to memorize it; once the cookie is set, clean dashboard URLs should work from that browser.
 
 ## Notes
 

@@ -66,6 +66,15 @@ describe("schema validation", () => {
     expect(result.issues).toEqual([]);
   });
 
+  it("preserves graph kind after validation", () => {
+    const graph = { ...structuredClone(validGraph), kind: "knowledge" as const };
+
+    const result = validateGraph(graph);
+
+    expect(result.success).toBe(true);
+    expect(result.data!.kind).toBe("knowledge");
+  });
+
   it("rejects graph with missing required fields", () => {
     const incomplete = { version: "1.0.0" };
     const result = validateGraph(incomplete);

@@ -16,6 +16,8 @@ import ProjectOverview from "./components/ProjectOverview";
 import FileExplorer from "./components/FileExplorer";
 import WarningBanner from "./components/WarningBanner";
 import TokenGate from "./components/TokenGate";
+import GraphLibrarySelector from "./components/GraphLibrarySelector";
+import type { GraphLibraryEntry } from "./components/GraphLibrarySelector";
 import MobileLayout from "./components/MobileLayout";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
@@ -28,6 +30,7 @@ import { I18nProvider, useI18n } from "./contexts/I18nContext.tsx";
 // Lazy-load heavy / optional components so they ship in separate chunks.
 const CodeViewer = lazy(() => import("./components/CodeViewer"));
 const LearnPanel = lazy(() => import("./components/LearnPanel"));
+const DeepDivePanel = lazy(() => import("./components/DeepDivePanel"));
 const PathFinderModal = lazy(() => import("./components/PathFinderModal"));
 const KeyboardShortcutsHelp = lazy(
   () => import("./components/KeyboardShortcutsHelp"),
@@ -35,9 +38,10 @@ const KeyboardShortcutsHelp = lazy(
 const OnboardingOverlay = lazy(() => import("./components/OnboardingOverlay"));
 
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
-const SESSION_TOKEN_KEY = "understand-anything-token";
+const GRAPH_LIBRARY_SELECTED_KEY = "understand-anything-selected-graph";
 const ONBOARDING_DISMISSED_KEY = "ua-onboarding-dismissed-v1";
 type SidebarTab = "info" | "files";
+type AccessTokenState = string | null | undefined;
 
 function shouldShowOnboarding(): boolean {
   if (typeof window === "undefined") return false;
@@ -47,7 +51,7 @@ function shouldShowOnboarding(): boolean {
 }
 
 /** Resolve data file URL — in demo mode, use env var URLs; otherwise use local paths with token. */
-function dataUrl(fileName: string, token: string | null): string {
+function dataUrl(fileName: string, token: string | null, graphId?: string | null): string {
   if (DEMO_MODE) {
     const envMap: Record<string, string | undefined> = {
       "knowledge-graph.json": import.meta.env.VITE_GRAPH_URL,
@@ -60,41 +64,95 @@ function dataUrl(fileName: string, token: string | null): string {
     if (url) return url;
   }
   const path = `/${fileName}`;
-  return token ? `${path}?token=${encodeURIComponent(token)}` : path;
+  const params = new URLSearchParams();
+  if (token) params.set("token", token);
+  if (graphId) params.set("graph", graphId);
+  const query = params.toString();
+  return query ? `${path}?${query}` : path;
+}
+
+function resolveInitialGraphId(): string | null {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  return params.get("graph") ?? sessionStorage.getItem(GRAPH_LIBRARY_SELECTED_KEY);
+}
+
+function persistSelectedGraphId(graphId: string | null) {
+  if (typeof window === "undefined" || !graphId) return;
+  sessionStorage.setItem(GRAPH_LIBRARY_SELECTED_KEY, graphId);
+  const params = new URLSearchParams(window.location.search);
+  params.set("graph", graphId);
+  const cleanSearch = params.toString();
+  const newUrl =
+    window.location.pathname + (cleanSearch ? `?${cleanSearch}` : "") + window.location.hash;
+  window.history.replaceState(null, "", newUrl);
 }
 
 /**
- * Resolve the access token from the URL query string or sessionStorage.
- * If found in the URL, persist to sessionStorage and strip the param from the address bar.
+ * Resolve a bootstrap token from the URL query string, then strip it from the
+ * address bar. Long-lived auth is stored server-side in an HttpOnly cookie, not
+ * in sessionStorage/localStorage.
  */
 function resolveInitialToken(): string | null {
   if (DEMO_MODE) return "__demo__";
   const params = new URLSearchParams(window.location.search);
   const urlToken = params.get("token");
-  if (urlToken) {
-    sessionStorage.setItem(SESSION_TOKEN_KEY, urlToken);
-    // Clean the URL
-    params.delete("token");
-    const cleanSearch = params.toString();
-    const newUrl =
-      window.location.pathname + (cleanSearch ? `?${cleanSearch}` : "") + window.location.hash;
-    window.history.replaceState(null, "", newUrl);
-    return urlToken;
-  }
-  return sessionStorage.getItem(SESSION_TOKEN_KEY);
+  if (!urlToken) return null;
+
+  params.delete("token");
+  const cleanSearch = params.toString();
+  const newUrl =
+    window.location.pathname + (cleanSearch ? `?${cleanSearch}` : "") + window.location.hash;
+  window.history.replaceState(null, "", newUrl);
+  return urlToken;
+}
+
+function authSessionUrl(token?: string | null): string {
+  const params = new URLSearchParams();
+  if (token) params.set("token", token);
+  const query = params.toString();
+  return query ? `/auth/session?${query}` : "/auth/session";
 }
 
 function App() {
-  const [accessToken, setAccessToken] = useState<string | null>(resolveInitialToken);
+  const initialToken = useMemo(() => resolveInitialToken(), []);
+  const [accessToken, setAccessToken] = useState<AccessTokenState>(
+    DEMO_MODE ? "__demo__" : initialToken ?? undefined,
+  );
 
-  const handleTokenValid = useCallback((token: string) => {
-    sessionStorage.setItem(SESSION_TOKEN_KEY, token);
-    setAccessToken(token);
+  useEffect(() => {
+    if (DEMO_MODE) return;
+    let cancelled = false;
+    fetch(authSessionUrl(initialToken), { credentials: "same-origin" })
+      .then((res) => {
+        if (cancelled) return;
+        setAccessToken(res.ok ? "" : null);
+      })
+      .catch(() => {
+        if (!cancelled) setAccessToken(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [initialToken]);
+
+  const handleTokenValid = useCallback(() => {
+    setAccessToken("");
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    fetch("/auth/logout", { credentials: "same-origin" }).finally(() => {
+      setAccessToken(null);
+    });
   }, []);
 
   // In demo mode, skip token gate entirely
   if (DEMO_MODE) {
-    return <Dashboard accessToken="__demo__" />;
+    return <Dashboard accessToken="__demo__" onLogout={() => {}} />;
+  }
+
+  if (accessToken === undefined) {
+    return <AuthLoadingState />;
   }
 
   // Show the token gate when no token is available
@@ -102,42 +160,81 @@ function App() {
     return <TokenGate onTokenValid={handleTokenValid} />;
   }
 
-  return <Dashboard accessToken={accessToken} />;
+  return <Dashboard accessToken={accessToken} onLogout={handleLogout} />;
 }
 
-function Dashboard({ accessToken }: { accessToken: string }) {
+function AuthLoadingState() {
+  return (
+    <div className="h-screen w-screen flex items-center justify-center bg-root noise-overlay text-text-muted">
+      Checking saved dashboard authorization...
+    </div>
+  );
+}
+
+function Dashboard({ accessToken, onLogout }: { accessToken: string; onLogout: () => void }) {
   const setGraph = useDashboardStore((s) => s.setGraph);
   const setDomainGraph = useDashboardStore((s) => s.setDomainGraph);
   const setDiffOverlay = useDashboardStore((s) => s.setDiffOverlay);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [graphLoading, setGraphLoading] = useState(true);
   const [graphIssues, setGraphIssues] = useState<GraphIssue[]>([]);
+  const [graphLibrary, setGraphLibrary] = useState<GraphLibraryEntry[]>([]);
+  const [activeGraphId, setActiveGraphId] = useState<string | null>(resolveInitialGraphId);
   const [metaTheme, setMetaTheme] = useState<ThemeConfig | null>(null);
   const [outputLanguage, setOutputLanguage] = useState<string | undefined>();
 
   useEffect(() => {
-    fetch(dataUrl("meta.json", accessToken))
+    if (DEMO_MODE) return;
+    fetch(dataUrl("graph-library.json", accessToken))
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: unknown) => {
+        if (!data || typeof data !== "object" || !Array.isArray((data as { graphs?: unknown }).graphs)) {
+          return;
+        }
+        const entries = (data as { graphs: GraphLibraryEntry[] }).graphs;
+        setGraphLibrary(entries);
+        if (entries.length === 0) return;
+        const current = resolveInitialGraphId();
+        const next = entries.some((entry) => entry.id === current) ? current : entries[0].id;
+        if (next) {
+          setActiveGraphId(next);
+          persistSelectedGraphId(next);
+        }
+      })
+      .catch(() => {});
+  }, [accessToken]);
+
+  useEffect(() => {
+    fetch(dataUrl("meta.json", accessToken, activeGraphId))
       .then((r) => (r.ok ? r.json() : null))
       .then((meta) => {
         if (meta?.theme) setMetaTheme(meta.theme);
       })
       .catch(() => {});
-    fetch(dataUrl("config.json", accessToken))
+    fetch(dataUrl("config.json", accessToken, activeGraphId))
       .then((r) => (r.ok ? r.json() : null))
       .then((config) => {
         if (config?.outputLanguage) setOutputLanguage(config.outputLanguage);
       })
       .catch(() => {});
-  }, []);
+  }, [accessToken, activeGraphId]);
 
   useEffect(() => {
-    fetch(dataUrl("knowledge-graph.json", accessToken))
-      .then((res) => res.json())
+    let cancelled = false;
+    setGraphLoading(true);
+    setLoadError(null);
+    fetch(dataUrl("knowledge-graph.json", accessToken, activeGraphId))
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`.trim());
+        return res.json();
+      })
       .then((data: unknown) => {
+        if (cancelled) return;
         const result = validateGraph(data);
         if (result.success && result.data) {
           setGraph(result.data);
           setGraphIssues(result.issues);
-          if ((data as Record<string, unknown>).kind === "knowledge") {
+          if (result.data.kind === "knowledge") {
             useDashboardStore.getState().setViewMode("knowledge");
             useDashboardStore.getState().setIsKnowledgeGraph(true);
           }
@@ -157,13 +254,20 @@ function Dashboard({ accessToken }: { accessToken: string }) {
         }
       })
       .catch((err) => {
+        if (cancelled) return;
         console.error("Failed to load knowledge graph:", err);
         setLoadError(`Failed to load knowledge graph: ${err instanceof Error ? err.message : String(err)}`);
+      })
+      .finally(() => {
+        if (!cancelled) setGraphLoading(false);
       });
-  }, [setGraph]);
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken, activeGraphId, setGraph]);
 
   useEffect(() => {
-    fetch(dataUrl("diff-overlay.json", accessToken))
+    fetch(dataUrl("diff-overlay.json", accessToken, activeGraphId))
       .then((res) => {
         if (!res.ok) return null;
         return res.json();
@@ -184,10 +288,10 @@ function Dashboard({ accessToken }: { accessToken: string }) {
         }
       })
       .catch(() => {});
-  }, [setDiffOverlay]);
+  }, [accessToken, activeGraphId, setDiffOverlay]);
 
   useEffect(() => {
-    fetch(dataUrl("domain-graph.json", accessToken))
+    fetch(dataUrl("domain-graph.json", accessToken, activeGraphId))
       .then((res) => {
         if (!res.ok) return null;
         return res.json();
@@ -202,7 +306,14 @@ function Dashboard({ accessToken }: { accessToken: string }) {
         }
       })
       .catch(() => {});
-  }, [setDomainGraph]);
+  }, [accessToken, activeGraphId, setDomainGraph]);
+
+  const handleSelectGraph = useCallback((graphId: string) => {
+    setActiveGraphId(graphId);
+    setLoadError(null);
+    setGraphIssues([]);
+    persistSelectedGraphId(graphId);
+  }, []);
 
   return (
     <I18nProvider language={outputLanguage ?? "en"}>
@@ -210,26 +321,53 @@ function Dashboard({ accessToken }: { accessToken: string }) {
         <DashboardContent
           accessToken={accessToken}
           loadError={loadError}
+          graphLoading={graphLoading}
           graphIssues={graphIssues}
+          graphLibrary={graphLibrary}
+          activeGraphId={activeGraphId}
+          onSelectGraph={handleSelectGraph}
+          onLogout={onLogout}
         />
       </ThemeProvider>
     </I18nProvider>
   );
 }
 
+function GraphLoadingState() {
+  return (
+    <div className="h-full flex items-center justify-center p-6">
+      <div className="rounded-2xl border border-border-subtle bg-surface/80 px-6 py-5 text-center shadow-xl">
+        <div className="mx-auto mb-4 h-8 w-8 rounded-full border-2 border-accent/30 border-t-accent animate-spin" />
+        <div className="font-serif text-xl text-text-primary mb-1">Loading knowledge graph</div>
+        <div className="text-sm text-text-muted">Parsing graph data before selecting a render path…</div>
+      </div>
+    </div>
+  );
+}
+
 function DashboardContent({
   accessToken,
   loadError,
+  graphLoading,
   graphIssues,
+  graphLibrary,
+  activeGraphId,
+  onSelectGraph,
+  onLogout,
 }: {
   accessToken: string;
   loadError: string | null;
+  graphLoading: boolean;
   graphIssues: GraphIssue[];
+  graphLibrary: GraphLibraryEntry[];
+  activeGraphId: string | null;
+  onSelectGraph: (graphId: string) => void;
+  onLogout: () => void;
 }) {
   const graph = useDashboardStore((s) => s.graph);
   const selectedNodeId = useDashboardStore((s) => s.selectedNodeId);
   const tourActive = useDashboardStore((s) => s.tourActive);
-  const persona = useDashboardStore((s) => s.persona);
+  const dashboardMode = useDashboardStore((s) => s.dashboardMode);
   const codeViewerOpen = useDashboardStore((s) => s.codeViewerOpen);
   const codeViewerExpanded = useDashboardStore((s) => s.codeViewerExpanded);
   const expandCodeViewer = useDashboardStore((s) => s.expandCodeViewer);
@@ -385,10 +523,11 @@ function DashboardContent({
   // Register keyboard shortcuts
   useKeyboardShortcuts(shortcuts);
 
-  // Determine sidebar content
-  // NodeInfo always takes priority when a node is selected.
-  // Learn mode adds LearnPanel below it; otherwise ProjectOverview shows when idle.
-  const isLearnMode = tourActive || persona === "junior";
+  // Determine sidebar content.
+  // Dashboard mode is now explicit: Overview, Learn, and Deep Dive render
+  // different product surfaces instead of being only a persona filter.
+  const isLearnMode = tourActive || dashboardMode === "learn";
+  const isDeepDiveMode = dashboardMode === "deep-dive";
   const infoSidebarContent = (
     <>
       {selectedNodeId && <NodeInfo />}
@@ -397,7 +536,12 @@ function DashboardContent({
           <LearnPanel />
         </Suspense>
       )}
-      {!selectedNodeId && !isLearnMode && <ProjectOverview />}
+      {isDeepDiveMode && (
+        <Suspense fallback={null}>
+          <DeepDivePanel />
+        </Suspense>
+      )}
+      {!selectedNodeId && !isLearnMode && !isDeepDiveMode && <ProjectOverview />}
     </>
   );
 
@@ -432,8 +576,12 @@ function DashboardContent({
         showKeyboardHelp={showKeyboardHelp}
         setShowKeyboardHelp={setShowKeyboardHelp}
         loadError={loadError}
+        graphLoading={graphLoading}
         allIssues={allIssues}
         shortcuts={shortcuts}
+        graphLibrary={graphLibrary}
+        activeGraphId={activeGraphId}
+        onSelectGraph={onSelectGraph}
       />
     );
   }
@@ -449,6 +597,11 @@ function DashboardContent({
           </h1>
           <div className="w-px h-5 bg-border-subtle hidden sm:block" />
           <PersonaSelector />
+          <GraphLibrarySelector
+            entries={graphLibrary}
+            activeGraphId={activeGraphId}
+            onSelect={onSelectGraph}
+          />
           {graph && !isKnowledgeGraph && domainGraph && (
             <>
               <div className="w-px h-5 bg-border-subtle" />
@@ -595,6 +748,26 @@ function DashboardContent({
           </button>
           <ThemePicker />
           <button
+            onClick={onLogout}
+            className="text-text-muted hover:text-accent transition-colors"
+            title="Forget saved dashboard authorization on this device"
+            aria-label="Forget saved dashboard authorization"
+          >
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H3v-4.586l5.257-5.257A6 6 0 1121 9z"
+              />
+            </svg>
+          </button>
+          <button
             onClick={() => setShowKeyboardHelp(true)}
             className="text-text-muted hover:text-accent transition-colors"
             title={t.keyboardShortcuts.showHelp}
@@ -635,7 +808,9 @@ function DashboardContent({
       <div className="flex-1 flex min-h-0 relative">
         {/* Graph area */}
         <div className="flex-1 min-w-0 min-h-0 relative">
-          {viewMode === "knowledge" ? (
+          {graphLoading && !graph && !loadError ? (
+            <GraphLoadingState />
+          ) : viewMode === "knowledge" ? (
             <KnowledgeGraphView />
           ) : viewMode === "domain" && domainGraph ? (
             <DomainGraphView />

@@ -10,11 +10,207 @@ import crypto from "crypto";
 // This token is printed to the terminal and must be in the URL
 // to fetch knowledge-graph.json or diff-overlay.json.
 const ACCESS_TOKEN = process.env.UNDERSTAND_ACCESS_TOKEN || crypto.randomBytes(16).toString("hex");
+const AUTH_COOKIE_NAME = "understand_anything_auth";
+const AUTH_COOKIE_MAX_AGE_SECONDS = Number(
+  process.env.UNDERSTAND_AUTH_COOKIE_MAX_AGE_SECONDS ?? 60 * 60 * 24 * 90,
+);
+const AUTH_COOKIE_SECURE = process.env.UNDERSTAND_AUTH_COOKIE_SECURE === "true";
 const ADDITIONAL_ALLOWED_HOSTS = (process.env.UNDERSTAND_ALLOWED_HOSTS ?? "")
   .split(",")
   .map((host) => host.trim())
   .filter(Boolean);
 const MAX_SOURCE_FILE_BYTES = 1024 * 1024;
+
+function parseCookies(cookieHeader: string | undefined): Map<string, string> {
+  const cookies = new Map<string, string>();
+  if (!cookieHeader) return cookies;
+  for (const pair of cookieHeader.split(";")) {
+    const separator = pair.indexOf("=");
+    if (separator === -1) continue;
+    const name = pair.slice(0, separator).trim();
+    const value = pair.slice(separator + 1).trim();
+    if (!name) continue;
+    try {
+      cookies.set(name, decodeURIComponent(value));
+    } catch {
+      cookies.set(name, value);
+    }
+  }
+  return cookies;
+}
+
+function authCookieHeader(value: string, maxAgeSeconds: number): string {
+  return [
+    `${AUTH_COOKIE_NAME}=${encodeURIComponent(value)}`,
+    "Path=/",
+    `Max-Age=${maxAgeSeconds}`,
+    "HttpOnly",
+    "SameSite=Lax",
+    ...(AUTH_COOKIE_SECURE ? ["Secure"] : []),
+  ].join("; ");
+}
+
+function hasValidAccess(url: URL, req: import("http").IncomingMessage): boolean {
+  const queryToken = url.searchParams.get("token");
+  if (queryToken === ACCESS_TOKEN) return true;
+  return parseCookies(req.headers.cookie).get(AUTH_COOKIE_NAME) === ACCESS_TOKEN;
+}
+
+function setPersistentAuthCookie(res: import("http").ServerResponse) {
+  res.setHeader("Set-Cookie", authCookieHeader(ACCESS_TOKEN, AUTH_COOKIE_MAX_AGE_SECONDS));
+}
+
+function clearPersistentAuthCookie(res: import("http").ServerResponse) {
+  res.setHeader("Set-Cookie", authCookieHeader("", 0));
+}
+
+const GRAPH_LIBRARY_DIR = process.env.GRAPH_LIBRARY_DIR || process.env.UNDERSTAND_GRAPH_LIBRARY_DIR;
+
+interface GraphLibraryEntry {
+  id: string;
+  label: string;
+  projectName: string;
+  description?: string;
+  relativePath: string;
+  absolutePath: string;
+  nodeCount: number;
+  edgeCount: number;
+  layerCount: number;
+  tourStepCount: number;
+  analyzedAt?: string;
+  gitCommitHash?: string;
+}
+
+function graphLibraryRoot(): string | null {
+  if (!GRAPH_LIBRARY_DIR) return null;
+  const root = path.resolve(GRAPH_LIBRARY_DIR);
+  if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return null;
+  return root;
+}
+
+function graphIdForRelativePath(relativePath: string): string {
+  return relativePath
+    .replace(/\.json$/i, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/[.]+/g, "_")
+    .replace(/^-+|-+$/g, "");
+}
+
+function isPrimaryKnowledgeGraphFile(filePath: string): boolean {
+  const base = path.basename(filePath);
+  const normalized = filePath.split(path.sep).join("/");
+  if (normalized.includes("/run_artifacts/") || normalized.includes("/intermediate/")) return false;
+  return base === "knowledge-graph.json" || /_knowledge_graph_understand_anything_\d{4}-\d{2}-\d{2}\.json$/.test(base);
+}
+
+function discoverGraphLibrary(): GraphLibraryEntry[] {
+  const root = graphLibraryRoot();
+  if (!root) return [];
+  const entries: GraphLibraryEntry[] = [];
+  const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+  while (stack.length > 0) {
+    const { dir, depth } = stack.pop()!;
+    if (depth > 4) continue;
+    let dirents: fs.Dirent[];
+    try {
+      dirents = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const dirent of dirents) {
+      const absolutePath = path.join(dir, dirent.name);
+      if (dirent.isDirectory()) {
+        if (dirent.name === "run_artifacts" || dirent.name === "intermediate" || dirent.name === "tmp") continue;
+        stack.push({ dir: absolutePath, depth: depth + 1 });
+        continue;
+      }
+      if (!dirent.isFile() || !isPrimaryKnowledgeGraphFile(absolutePath)) continue;
+      try {
+        const graph = JSON.parse(fs.readFileSync(absolutePath, "utf-8")) as {
+          project?: Record<string, unknown>;
+          nodes?: unknown[];
+          edges?: unknown[];
+          layers?: unknown[];
+          tour?: unknown[];
+        };
+        const relativePath = path.relative(root, absolutePath).split(path.sep).join("/");
+        const projectName =
+          typeof graph.project?.name === "string" && graph.project.name.trim()
+            ? graph.project.name.trim()
+            : path.basename(path.dirname(absolutePath));
+        entries.push({
+          id: graphIdForRelativePath(relativePath),
+          label: `${projectName} (${relativePath.split("/")[0]})`,
+          projectName,
+          description: typeof graph.project?.description === "string" ? graph.project.description : undefined,
+          relativePath,
+          absolutePath,
+          nodeCount: Array.isArray(graph.nodes) ? graph.nodes.length : 0,
+          edgeCount: Array.isArray(graph.edges) ? graph.edges.length : 0,
+          layerCount: Array.isArray(graph.layers) ? graph.layers.length : 0,
+          tourStepCount: Array.isArray(graph.tour) ? graph.tour.length : 0,
+          analyzedAt: typeof graph.project?.analyzedAt === "string" ? graph.project.analyzedAt : undefined,
+          gitCommitHash: typeof graph.project?.gitCommitHash === "string" ? graph.project.gitCommitHash : undefined,
+        });
+      } catch (err) {
+        console.warn("[understand-anything] Skipping unreadable graph library file:", absolutePath, err);
+      }
+    }
+  }
+  return entries.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function publicGraphLibraryPayload() {
+  return {
+    graphs: discoverGraphLibrary().map(({ absolutePath: _absolutePath, ...entry }) => entry),
+  };
+}
+
+function graphFileFromLibrary(graphId: string | null): string | null {
+  const entries = discoverGraphLibrary();
+  if (entries.length === 0) return null;
+  if (graphId) {
+    return entries.find((entry) => entry.id === graphId)?.absolutePath ?? null;
+  }
+  return entries[0].absolutePath;
+}
+
+function findSelectedKnowledgeGraphFile(url: URL): string | null {
+  const requestedGraphId = url.searchParams.get("graph") || process.env.UNDERSTAND_DEFAULT_GRAPH_ID || null;
+  return graphFileFromLibrary(requestedGraphId) ?? findGraphFile("knowledge-graph.json");
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function sourceRootFromRunManifest(graphFile: string): string | null {
+  const libraryRoot = graphLibraryRoot();
+  const absoluteGraphFile = path.resolve(graphFile);
+  if (!libraryRoot || !isPathInside(libraryRoot, absoluteGraphFile)) return null;
+
+  const manifestPath = path.join(path.dirname(absoluteGraphFile), "MANIFEST.md");
+  if (!fs.existsSync(manifestPath)) return null;
+
+  try {
+    const manifest = fs.readFileSync(manifestPath, "utf-8");
+    const match =
+      manifest.match(/^- Source repo(?: path)?: `([^`]+)`/m) ??
+      manifest.match(/^- Source absolute path: `([^`]+)`/m) ??
+      manifest.match(/^- Source path: `([^`]+)`/m);
+    if (!match) return null;
+    const sourceRoot = path.resolve(match[1]);
+    if (!fs.existsSync(sourceRoot) || !fs.statSync(sourceRoot).isDirectory()) return null;
+    return sourceRoot;
+  } catch {
+    return null;
+  }
+}
+
+function sourceRootForGraphFile(graphFile: string): string {
+  return sourceRootFromRunManifest(graphFile) ?? projectRootFromGraphFile(graphFile);
+}
 
 function graphFileCandidates(fileName: string): string[] {
   const graphDir = process.env.GRAPH_DIR;
@@ -131,12 +327,12 @@ function readSourceFile(url: URL) {
     return rejectFileRequest("Path must stay inside the project");
   }
 
-  const graphFile = findGraphFile("knowledge-graph.json");
+  const graphFile = findSelectedKnowledgeGraphFile(url);
   if (!graphFile) {
     return rejectFileRequest("No knowledge graph found. Run /understand first.", 404);
   }
 
-  const projectRoot = projectRootFromGraphFile(graphFile);
+  const projectRoot = sourceRootForGraphFile(graphFile);
   const absoluteFile = path.resolve(projectRoot, normalizedPath);
   const relativeToRoot = path.relative(projectRoot, absoluteFile);
   if (
@@ -242,35 +438,64 @@ export default defineConfig({
     {
       name: "serve-knowledge-graph",
       configureServer(server) {
-        // Print the access URL once so the developer can open it.
+        // Print the access URL once so the developer can open it. LaunchAgent-style
+        // deployments can redact the bearer token and expose it through a local
+        // mode-0600 token file instead.
         server.httpServer?.once("listening", () => {
           const address = server.httpServer?.address();
           const port = typeof address === "object" && address ? address.port : 5173;
-          console.log(
-            `\n  🔑  Dashboard URL: http://127.0.0.1:${port}/?token=${ACCESS_TOKEN}\n`
-          );
+          const tokenForLog = process.env.UNDERSTAND_REDACT_TOKEN_LOG === "true" ? "<redacted>" : ACCESS_TOKEN;
+          console.log(`\n  🔑  Dashboard URL: http://127.0.0.1:${port}/?token=${tokenForLog}\n`);
         });
 
         server.middlewares.use((req, res, next) => {
           const url = new URL(req.url ?? "/", "http://127.0.0.1:5173");
           const pathname = url.pathname;
+          const isAuthSessionEndpoint = pathname === "/auth/session";
+          const isAuthLogoutEndpoint = pathname === "/auth/logout";
           const isProtectedEndpoint =
             pathname === "/knowledge-graph.json" ||
             pathname === "/domain-graph.json" ||
             pathname === "/diff-overlay.json" ||
             pathname === "/meta.json" ||
             pathname === "/config.json" ||
-            pathname === "/file-content.json";
+            pathname === "/file-content.json" ||
+            pathname === "/graph-library.json";
+
+          if (isAuthLogoutEndpoint) {
+            clearPersistentAuthCookie(res);
+            sendJson(res, 200, { ok: true });
+            return;
+          }
+
+          if (isAuthSessionEndpoint) {
+            if (hasValidAccess(url, req)) {
+              if (url.searchParams.get("token") === ACCESS_TOKEN) {
+                setPersistentAuthCookie(res);
+              }
+              sendJson(res, 200, { ok: true });
+            } else {
+              sendJson(res, 403, { error: "Forbidden: missing or invalid token" });
+            }
+            return;
+          }
 
           if (!isProtectedEndpoint) {
             next();
             return;
           }
 
-          // FIX 3 — require the one-time token on all data endpoints.
-          // Requests without a matching ?token= get a 403.
-          if (url.searchParams.get("token") !== ACCESS_TOKEN) {
+          // Require either a matching ?token= or the persistent HttpOnly auth cookie.
+          if (!hasValidAccess(url, req)) {
             sendJson(res, 403, { error: "Forbidden: missing or invalid token" });
+            return;
+          }
+          if (url.searchParams.get("token") === ACCESS_TOKEN) {
+            setPersistentAuthCookie(res);
+          }
+
+          if (pathname === "/graph-library.json") {
+            sendJson(res, 200, publicGraphLibraryPayload());
             return;
           }
 
@@ -307,7 +532,9 @@ export default defineConfig({
               ? "domain-graph.json"
               : "knowledge-graph.json";
 
-          const candidates = graphFileCandidates(fileName);
+          const candidates = fileName === "knowledge-graph.json"
+            ? [findSelectedKnowledgeGraphFile(url)].filter((candidate): candidate is string => Boolean(candidate))
+            : graphFileCandidates(fileName);
 
           for (const candidate of candidates) {
             if (!fs.existsSync(candidate)) continue;
@@ -322,9 +549,10 @@ export default defineConfig({
                 [key: string]: unknown;
               };
 
-              // Derive the project root from the candidate path so we can
-              // make file paths relative to it.
-              const projectRoot = projectRootFromGraphFile(candidate);
+              // Derive the source root from the graph file. Preserved graph-library
+              // snapshots may live in Atrium while their readable source files remain
+              // in the original checkout recorded by MANIFEST.md.
+              const projectRoot = sourceRootForGraphFile(candidate);
 
               if (Array.isArray(raw.nodes)) {
                 raw.nodes = raw.nodes.map((node) => {

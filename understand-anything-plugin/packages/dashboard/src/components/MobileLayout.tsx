@@ -13,19 +13,38 @@ import WarningBanner from "./WarningBanner";
 import MobileBottomNav from "./MobileBottomNav";
 import type { MobileTab } from "./MobileBottomNav";
 import MobileDrawer from "./MobileDrawer";
+import GraphLibrarySelector from "./GraphLibrarySelector";
+import type { GraphLibraryEntry } from "./GraphLibrarySelector";
 
 const CodeViewer = lazy(() => import("./CodeViewer"));
 const LearnPanel = lazy(() => import("./LearnPanel"));
+const DeepDivePanel = lazy(() => import("./DeepDivePanel"));
 const PathFinderModal = lazy(() => import("./PathFinderModal"));
 const KeyboardShortcutsHelp = lazy(() => import("./KeyboardShortcutsHelp"));
+
+function MobileGraphLoadingState() {
+  return (
+    <div className="h-full flex items-center justify-center p-5">
+      <div className="rounded-2xl border border-border-subtle bg-surface/80 px-5 py-5 text-center shadow-xl">
+        <div className="mx-auto mb-4 h-8 w-8 rounded-full border-2 border-accent/30 border-t-accent animate-spin" />
+        <div className="font-serif text-xl text-text-primary mb-1">Loading knowledge graph</div>
+        <div className="text-sm text-text-muted">Parsing graph data before rendering…</div>
+      </div>
+    </div>
+  );
+}
 
 interface Props {
   accessToken: string;
   showKeyboardHelp: boolean;
   setShowKeyboardHelp: (value: boolean) => void;
   loadError: string | null;
+  graphLoading: boolean;
   allIssues: GraphIssue[];
   shortcuts: import("../hooks/useKeyboardShortcuts").KeyboardShortcut[];
+  graphLibrary: GraphLibraryEntry[];
+  activeGraphId: string | null;
+  onSelectGraph: (graphId: string) => void;
 }
 
 export default function MobileLayout({
@@ -33,13 +52,17 @@ export default function MobileLayout({
   showKeyboardHelp,
   setShowKeyboardHelp,
   loadError,
+  graphLoading,
   allIssues,
   shortcuts,
+  graphLibrary,
+  activeGraphId,
+  onSelectGraph,
 }: Props) {
   const graph = useDashboardStore((s) => s.graph);
   const selectedNodeId = useDashboardStore((s) => s.selectedNodeId);
   const tourActive = useDashboardStore((s) => s.tourActive);
-  const persona = useDashboardStore((s) => s.persona);
+  const dashboardMode = useDashboardStore((s) => s.dashboardMode);
   const viewMode = useDashboardStore((s) => s.viewMode);
   const domainGraph = useDashboardStore((s) => s.domainGraph);
   const codeViewerOpen = useDashboardStore((s) => s.codeViewerOpen);
@@ -63,7 +86,8 @@ export default function MobileLayout({
     if (codeViewerOpen) setSearchOpen(false);
   }, [codeViewerOpen]);
 
-  const isLearnMode = tourActive || persona === "junior";
+  const isLearnMode = tourActive || dashboardMode === "learn";
+  const isDeepDiveMode = dashboardMode === "deep-dive";
   const infoContent = (
     <>
       {selectedNodeId && <NodeInfo />}
@@ -72,7 +96,12 @@ export default function MobileLayout({
           <LearnPanel />
         </Suspense>
       )}
-      {!selectedNodeId && !isLearnMode && <ProjectOverview />}
+      {isDeepDiveMode && (
+        <Suspense fallback={null}>
+          <DeepDivePanel />
+        </Suspense>
+      )}
+      {!selectedNodeId && !isLearnMode && !isDeepDiveMode && <ProjectOverview />}
     </>
   );
 
@@ -128,6 +157,16 @@ export default function MobileLayout({
         </button>
       </header>
 
+      {graphLibrary.length > 0 && (
+        <div className="px-3 py-2 shrink-0 bg-surface/95 border-b border-border-subtle">
+          <GraphLibrarySelector
+            entries={graphLibrary}
+            activeGraphId={activeGraphId}
+            onSelect={onSelectGraph}
+          />
+        </div>
+      )}
+
       {/* Search (collapsible) */}
       {searchOpen && <SearchBar />}
 
@@ -152,7 +191,9 @@ export default function MobileLayout({
           }`}
           aria-hidden={activeTab !== "graph"}
         >
-          {viewMode === "knowledge" ? (
+          {graphLoading && !graph && !loadError ? (
+            <MobileGraphLoadingState />
+          ) : viewMode === "knowledge" ? (
             <KnowledgeGraphView />
           ) : viewMode === "domain" && domainGraph ? (
             <DomainGraphView />

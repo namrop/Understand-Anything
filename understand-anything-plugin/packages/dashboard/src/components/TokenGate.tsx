@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 interface TokenGateProps {
-  onTokenValid: (token: string) => void;
+  onTokenValid: () => void;
 }
 
 export default function TokenGate({ onTokenValid }: TokenGateProps) {
@@ -18,9 +18,11 @@ export default function TokenGate({ onTokenValid }: TokenGateProps) {
     setError(null);
 
     try {
-      const res = await fetch(`/knowledge-graph.json?token=${encodeURIComponent(token)}`);
+      const res = await fetch(`/auth/session?token=${encodeURIComponent(token)}`, {
+        credentials: "same-origin",
+      });
       if (res.ok) {
-        onTokenValid(token);
+        onTokenValid();
       } else if (res.status === 403) {
         setError("Invalid token. Please check and try again.");
       } else {
@@ -43,8 +45,8 @@ export default function TokenGate({ onTokenValid }: TokenGateProps) {
           Access Token Required
         </h1>
         <p className="text-text-muted text-sm text-center mb-8">
-          Paste the access token from your terminal. Look for the{" "}
-          <span role="img" aria-label="key">&#x1F511;</span> line.
+          Paste the access token once. This browser will be remembered with an
+          HttpOnly dashboard cookie.
         </p>
 
         {/* Form */}
