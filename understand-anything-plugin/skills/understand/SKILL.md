@@ -825,6 +825,8 @@ Report to the user: `[Phase 7/7] Saving knowledge graph...`
 6. Only automatically launch the dashboard by invoking the `/understand-dashboard` skill if final graph validation passed after normalization/review fixes.
    If final validation did not pass, report that the graph was saved with warnings and dashboard launch was skipped.
 
+7. **Luis/acubens graph-library preservation rule.** On Luis's acubens setup, port `5173` is normally owned by the persistent graph-library LaunchAgent `com.lux.understand-graph-library`, launched from `/Users/luisramirez/Digital_Workspace/27_knowledge/understand_anything/tools/launch_graph_library_dashboard.sh` and served by Caddy/Tailscale as the multi-project dashboard. Do **not** replace that service with a one-off `GRAPH_DIR=<project> vite --port 5173` dashboard. For completed runs that should appear in the web app, preserve the graph under `/Users/luisramirez/Digital_Workspace/27_knowledge/understand_anything/artifacts/runs/<run>/`, include `MANIFEST.md` with `- Source repo path: ...`, then verify `/graph-library.json` and `/knowledge-graph.json?graph=<graph-id>` on the existing service. If 5173 is wrong or occupied by a one-off process, kill only the one-off process, `launchctl kickstart -k gui/$(id -u)/com.lux.understand-graph-library`, and verify the selector still lists multiple projects.
+
 ---
 
 ## Error Handling
