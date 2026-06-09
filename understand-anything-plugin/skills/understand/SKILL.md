@@ -302,6 +302,8 @@ Report: `[Phase 2/7] Analyzing files — <totalFiles> files in <totalBatches> ba
 
 #### Optional direct provider runner for large/non-interactive runs
 
+**Luis-specific quality rule:** deterministic-only fallback graphs are a failed Understand Anything run, not an acceptable deliverable. If the direct runner reports any `fallback_batches` / `fallback` count greater than zero, do **not** save/report that graph as successful; retry with a working LLM provider configuration (prefer DeepSeek when requested) or report the provider failure honestly. Never replace a requested LLM-backed Understand run with deterministic fallback output.
+
 If the normal agentic batch loop is too slow, too conversational, or unreliable for a repository, you may replace the per-batch subagent dispatch loop with the bundled direct runner. It supports both OpenAI-compatible HTTP providers and the local Codex CLI OAuth session.
 
 DeepSeek/OpenAI-compatible HTTP example:
@@ -329,6 +331,7 @@ Notes:
 - Secrets are read only from the process environment or explicit `--env-file` paths for HTTP providers; do not commit env files or copy local credential paths into the repo. `--provider codex-cli` uses Codex's configured OAuth session and does not require `DEEPSEEK_API_KEY` or `OPENAI_API_KEY`.
 - It writes `intermediate/batch-*.json`, runs `merge-batch-graphs.py`, writes `.understand-anything/knowledge-graph.json`, updates `meta.json`, and records `.understand-anything/direct-run-report.json` plus the legacy `.understand-anything/deepseek-direct-run-report.json` alias.
 - Use `--limit N` for smoke tests and `--no-resume` to discard existing batch outputs before a clean run.
+- If a large Codex-backed run completes most batches but exits with a few `Selected model is at capacity` or `timed out after ... seconds` errors while fallback is disabled, do **not** throw away successful batch files. Inspect missing `intermediate/batch-<n>.json` files, then rerun the same command **without `--no-resume`**, preferably with `--workers 1` and a longer `--codex-timeout` (for example 3600). Existing batches will be skipped and only missing/error batches will be regenerated; keep `UA_DIRECT_FAIL_ON_FALLBACK=1` so deterministic fallback still cannot silently pass.
 - The runner prompts for file, function, and class nodes, merges deterministic tree-sitter symbol extraction back into LLM output, and emits `contains` edges so the graph retains source-reference surfaces even when provider output is sparse.
 
 If you use the direct runner successfully, skip the manual subagent loop below and continue with the post-merge/final validation phases using the generated `knowledge-graph.json`.

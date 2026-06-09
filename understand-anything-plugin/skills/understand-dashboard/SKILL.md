@@ -168,3 +168,7 @@ PY
 - If port 5173 is already in use, Vite will pick the next available port
 - The `GRAPH_DIR` environment variable tells the dashboard where to find the knowledge graph
 - Tailscale Serve routes are persistent; prefer dedicated non-443 ports here so existing root/path serve config is not clobbered. Clean a dashboard route with `tailscale serve --yes --https=<port> off`, not `tailscale serve reset`.
+
+## Routing note: graph-library ops
+
+If the task involves graph-library manifests, `/graph-library.json`, source-preview endpoints, dashboard smoke tests, Vite/Tailscale exposure, or preserved graph-run validation, load `understand-graph-library-ops` before writing custom probe scripts.

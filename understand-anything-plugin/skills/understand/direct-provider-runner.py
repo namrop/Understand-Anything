@@ -312,6 +312,16 @@ def extract_json(text: str) -> Any:
 
 def call_deepseek(messages: list[dict[str,str]], max_tokens: int = 12000) -> tuple[str, dict[str,int]]:
     headers={'Authorization':f'Bearer {API_KEY}','Content-Type':'application/json'}
+    # Local reasoning models (e.g. ds4-local) can spend thousands of tokens in
+    # hidden/side-channel reasoning before emitting JSON. Allow operators to
+    # clamp HTTP-provider output and set reasoning effort without editing the
+    # runner or touching global provider config.
+    http_max_tokens = os.environ.get('UA_DIRECT_HTTP_MAX_TOKENS')
+    if http_max_tokens:
+        try:
+            max_tokens = min(max_tokens, int(http_max_tokens))
+        except ValueError:
+            pass
     payload={
         'model': MODEL,
         'messages': messages,
@@ -320,6 +330,9 @@ def call_deepseek(messages: list[dict[str,str]], max_tokens: int = 12000) -> tup
         'max_tokens': max_tokens,
         'response_format': {'type':'json_object'},
     }
+    reasoning_effort = os.environ.get('UA_DIRECT_REASONING_EFFORT')
+    if reasoning_effort:
+        payload['reasoning_effort'] = reasoning_effort
     last_err=None
     for attempt in range(5):
         try:
@@ -496,6 +509,12 @@ def make_prompt(batch: dict[str,Any], scan: dict[str,Any], structure: dict[str,A
         'Analyze the provided batch of source files and produce nodes and edges compatible with Understand-Anything. '
         'Be concise, grounded, schema-valid, and keep output compact.'
     )
+    if os.environ.get('UA_DIRECT_FILE_LEVEL_ONLY') == '1':
+        symbol_rule = 'Emit file-level nodes only. Do NOT emit function or class nodes; the runner will merge deterministic function/class structure after your semantic file-level pass.'
+        edge_cap_rule = 'Soft caps: edges <= 60 plus required import edges. Prefer complete file-level imports and a small number of high-confidence semantic edges.'
+    else:
+        symbol_rule = 'Emit function/class nodes for significant deterministic symbols in code files: exported symbols, functions with 10+ lines, and classes that are exported or span 20+ lines. Every emitted function/class node MUST include filePath and lineRange.'
+        edge_cap_rule = 'Soft caps: edges <= 120 plus required contains/imports edges. Prefer complete structural surfaces over artificially tiny output.'
     user=f"""
 Project: {scan.get('projectName') or scan.get('name') or PROJECT_ROOT.name}
 Description: {scan.get('description') or scan.get('projectDescription') or 'Target codebase'}
@@ -519,12 +538,12 @@ GraphEdge fields:
 
     Rules:
 1. Emit one file-level node for every file listed.
-2. Emit function/class nodes for significant deterministic symbols in code files: exported symbols, functions with 10+ lines, and classes that are exported or span 20+ lines. Every emitted function/class node MUST include filePath and lineRange.
-3. Emit a contains edge from each file-level node to every function/class node it contains.
+2. {symbol_rule}
+3. Emit a contains edge from each file-level node to every function/class node it contains when function/class nodes are emitted.
 4. Use batchImportData for imports edges; emit one file-to-file imports edge for every resolved project-internal import.
 5. Add calls, inherits, implements, exports, configures, documents, tested_by, deploys, routes, defines_schema, and related edges when clearly supported by deterministic structure, imports, file names, or content.
 6. Do not invent file paths. You may reference file-level neighbor nodes from neighborMap/imports, but do not reference function/class neighbor nodes unless the symbol is explicitly present in neighborMap.
-7. Soft caps: edges <= 120 plus required contains/imports edges. Prefer complete structural surfaces over artificially tiny output.
+7. {edge_cap_rule}
 8. Keep summaries concise but useful: file summaries <= 24 words; function/class summaries <= 18 words. Tags: 3-5 short strings. Add languageNotes when a file/function/class demonstrates a notable language, framework, schema, config, or architecture pattern.
 9. Return minified JSON, not pretty-printed. Never include comments, trailing commas, or markdown fences.
 10. Output ONLY one JSON object; no prose; no markdown fences.
@@ -564,15 +583,23 @@ def process_batch(batch: dict[str,Any], scan: dict[str,Any]) -> dict[str,Any]:
         try:
             data=json.loads(target.read_text())
             if isinstance(data.get('nodes'), list) and isinstance(data.get('edges'), list):
-                return {'idx':idx,'status':'skipped','nodes':len(data['nodes']),'edges':len(data['edges']),'usage':{}}
+                with LOCK:
+                    STATS['completed'] += 1
+                    STATS['batches'][str(idx)]={'status':'skipped','nodes':len(data['nodes']),'edges':len(data['edges']),'retries':0,'fallback_reason':None,'usage':{}}
+                    if STATS['completed'] % 25 == 0:
+                        write_report()
+                return {'idx':idx,'status':'skipped','nodes':len(data['nodes']),'edges':len(data['edges']),'usage':{},'retries':0,'fallback_reason':None}
         except Exception:
             pass
     retries=0
     structure=run_structure(batch)
     fallback_reason=None
     try:
+        if os.environ.get('UA_DIRECT_DETERMINISTIC_ONLY') == '1':
+            raise RuntimeError('UA_DIRECT_DETERMINISTIC_ONLY=1')
         messages=make_prompt(batch, scan, structure)
-        content, usage=call_model(messages, max_tokens=14000)
+        batch_max_tokens = int(os.environ.get('UA_DIRECT_MAX_TOKENS', '14000'))
+        content, usage=call_model(messages, max_tokens=batch_max_tokens)
         try:
             parsed=extract_json(content)
             result=normalize_batch_output(parsed, batch)
@@ -583,17 +610,20 @@ def process_batch(batch: dict[str,Any], scan: dict[str,Any]) -> dict[str,Any]:
                 {'role':'assistant','content':content[:12000]},
                 {'role':'user','content':f'Your previous response was invalid JSON/schema: {e}. Return ONLY a corrected JSON object with nodes and edges arrays for the same batch.'}
             ]
-            repaired, usage2=call_model(repair_messages, max_tokens=14000)
+            repaired, usage2=call_model(repair_messages, max_tokens=batch_max_tokens)
             (TMP/f'ua-direct-raw-batch-{idx}-repair.txt').write_text(repaired, encoding='utf-8', errors='replace')
             for k,v in usage2.items(): usage[k]=usage.get(k,0)+v
             parsed=extract_json(repaired)
             result=normalize_batch_output(parsed, batch)
     except Exception as e:
         fallback_reason=str(e)
+        if os.environ.get('UA_DIRECT_REQUIRE_LLM') == '1' or os.environ.get('UA_DIRECT_FAIL_ON_FALLBACK') == '1':
+            raise RuntimeError(f'batch {idx} LLM semantic pass failed and deterministic fallback is disabled: {fallback_reason}') from e
         result=deterministic_fallback(batch, structure)
         usage={}
     result=merge_structural_nodes(result, batch, structure)
     target.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+
     status='ok' if not fallback_reason else 'fallback'
     with LOCK:
         STATS['completed'] += 1
@@ -1106,6 +1136,8 @@ def main() -> None:
                     write_report()
                 print(f"batch {idx} ERROR {e}", file=sys.stderr, flush=True)
     write_report({'phase':'merge'})
+    if (os.environ.get('UA_DIRECT_FAIL_ON_FALLBACK') == '1' or os.environ.get('UA_DIRECT_REQUIRE_LLM') == '1') and STATS.get('failed', 0):
+        raise RuntimeError(f"LLM analysis failed for {STATS['failed']} batch(es); deterministic fallback/partial graph finalization is disabled")
     assembled, merge_stderr=run_merge()
     final=assemble_final(scan, assembled)
     issues=validate_graph(final)
